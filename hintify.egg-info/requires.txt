@@ -1,0 +1,6 @@
+pillow
+pytesseract
+keyring
+requests
+google-generativeai
+pynput

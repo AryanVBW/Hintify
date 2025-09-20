@@ -1,0 +1,15 @@
+LICENSE
+MANIFEST.in
+README.md
+hintify.py
+logo.png
+pyproject.toml
+requirements.txt
+screenshot-64.png
+settings-94.png
+hintify.egg-info/PKG-INFO
+hintify.egg-info/SOURCES.txt
+hintify.egg-info/dependency_links.txt
+hintify.egg-info/entry_points.txt
+hintify.egg-info/requires.txt
+hintify.egg-info/top_level.txt

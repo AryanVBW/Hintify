@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hintify"
+version = "0.1.1"
+description = "SnapAssist AI – real-time clipboard-to-hints assistant"
+readme = "README.md"
+authors = [{ name = "Hintify Contributors" }]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["education", "ocr", "ai", "ollama", "gemini", "hints"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Education",
+  "Topic :: Education",
+]
+dependencies = [
+  "pillow",
+  "pytesseract",
+  "keyring",
+  "requests",
+  "google-generativeai",
+  "pynput",
+]
+
+[project.urls]
+Homepage = "https://github.com/AryanVBW/Hintify"
+
+[project.scripts]
+hintify = "hintify:main"
+
+[tool.setuptools]
+py-modules = ["hintify"]
+
+[tool.setuptools.data-files]
+"share/hintify" = ["logo.png", "settings-94.png", "screenshot-64.png", "README.md", "requirements.txt", "LICENSE"]

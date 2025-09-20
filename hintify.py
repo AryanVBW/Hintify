@@ -12,6 +12,8 @@ from io import BytesIO
 import json
 from threading import Thread
 import queue
+import site
+from pathlib import Path
 
 response_queue = queue.Queue()
 
@@ -219,6 +221,146 @@ def load_image_icon(path, size=(32, 32)):
     except Exception as e:
         colored_print(f"[UI] Failed to load icon {path}: {e}", Colors.WARNING)
     return None
+
+
+def find_asset(filename):
+    """Best-effort search for packaged or local asset file."""
+    candidates = []
+    try:
+        candidates.append(Path.cwd() / filename)
+        candidates.append(Path(__file__).resolve().parent / filename)
+    except Exception:
+        pass
+    try:
+        for base in list(site.getsitepackages()) + ([site.getusersitepackages()] if hasattr(site, "getusersitepackages") else []):
+            candidates.append(Path(base) / "share" / "hintify" / filename)
+    except Exception:
+        pass
+    for p in candidates:
+        try:
+            if p.exists():
+                return str(p)
+        except Exception:
+            continue
+    return filename
+
+
+# ---------------------------------
+# First-launch System Check & Setup
+# ---------------------------------
+
+def prompt_input(message, default=None):
+    try:
+        val = input(message).strip()
+        return val if val else default
+    except Exception:
+        return default
+
+
+def has_brew():
+    return shutil.which("brew") is not None
+
+
+def try_install_ollama_via_brew():
+    if platform.system() != "Darwin":
+        return False
+    if not has_brew():
+        colored_print("[Setup] Homebrew is not installed.", Colors.WARNING)
+        colored_print("[Setup] Install Homebrew first:", Colors.OKCYAN)
+        colored_print("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"", Colors.OKBLUE)
+        return False
+    try:
+        colored_print("[Setup] Installing Ollama via Homebrew...", Colors.OKCYAN)
+        # Prefer cask; fallback to formula if needed
+        res = subprocess.run(["brew", "install", "--cask", "ollama"], capture_output=True, text=True)
+        if res.returncode != 0:
+            # Try non-cask install
+            res2 = subprocess.run(["brew", "install", "ollama"], capture_output=True, text=True)
+            if res2.returncode != 0:
+                colored_print(f"[Setup] Homebrew install failed: {res.stderr or res2.stderr}", Colors.FAIL)
+                return False
+        colored_print("[Setup] Ollama installed via Homebrew.", Colors.OKGREEN)
+        return True
+    except Exception as e:
+        colored_print(f"[Setup] Could not run Homebrew: {e}", Colors.FAIL)
+        return False
+
+
+def guide_ollama_install():
+    sysname = platform.system()
+    colored_print("[Guide] Ollama installation steps:", Colors.HEADER)
+    if sysname == "Darwin":
+        colored_print("1) Install Homebrew if missing:", Colors.OKBLUE)
+        colored_print("   /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"", Colors.OKCYAN)
+        colored_print("2) Install Ollama:", Colors.OKBLUE)
+        colored_print("   brew install --cask ollama", Colors.OKCYAN)
+        colored_print("3) Launch Ollama once from Launchpad or 'ollama serve' if needed.", Colors.OKBLUE)
+    elif sysname == "Windows":
+        colored_print("1) Install Ollama from the official site.", Colors.OKBLUE)
+        colored_print("   https://ollama.com/download", Colors.OKCYAN)
+        colored_print("2) Ensure 'ollama' is available in PATH (reopen terminal).", Colors.OKBLUE)
+    else:
+        colored_print("1) Install Ollama for Linux as per docs:", Colors.OKBLUE)
+        colored_print("   https://ollama.com/download", Colors.OKCYAN)
+        colored_print("2) Start service: 'ollama serve' (if not auto-managed).", Colors.OKBLUE)
+
+
+def ensure_provider_on_first_launch(args):
+    cfg = load_config()
+    if cfg.get("setup_completed"):
+        return cfg
+
+    colored_print("[Setup] Running first-time setup...", Colors.HEADER)
+
+    # Ensure Python deps (usually installed via pip, but double-check)
+    for pkg, imp in [("pillow", "PIL"), ("pytesseract", None), ("keyring", None), ("requests", None), ("google-generativeai", "google.generativeai"), ("pynput", None)]:
+        ensure_package(pkg, imp or pkg)
+
+    # Provider selection
+    colored_print("Select AI provider:", Colors.OKBLUE)
+    colored_print("  1) Ollama (local, recommended)", Colors.OKCYAN)
+    colored_print("  2) Gemini (cloud)", Colors.OKCYAN)
+    choice = prompt_input("Enter 1 or 2 [1]: ", "1")
+
+    if choice == "2":
+        cfg["provider"] = "gemini"
+        # Guide for API key
+        colored_print("[Setup] Opening Gemini API key page...", Colors.OKBLUE)
+        try:
+            webbrowser.open("https://aistudio.google.com/apikey", new=2)
+        except Exception:
+            pass
+        key = prompt_input("Paste your Gemini API key here (or press Enter to skip): ", "")
+        if key:
+            try:
+                keyring.set_password("hintify", "gemini_api_key", key)
+                os.environ["GEMINI_API_KEY"] = key
+                colored_print("[Setup] Gemini API key saved to keychain.", Colors.OKGREEN)
+            except Exception as e:
+                colored_print(f"[Setup] Could not save key to keychain: {e}", Colors.FAIL)
+        cfg.setdefault("gemini_model", "gemini-2.0-flash")
+    else:
+        cfg["provider"] = "ollama"
+        cfg.setdefault("ollama_model", "granite3.2-vision:2b")
+        # Ensure Ollama
+        if not have_ollama():
+            colored_print("[Setup] Ollama not found.", Colors.WARNING)
+            installed = False
+            if platform.system() == "Darwin":
+                installed = try_install_ollama_via_brew()
+            if not installed:
+                guide_ollama_install()
+                prompt_input("Press Enter after you finish installing Ollama to continue...", "")
+        # Pull model
+        if have_ollama():
+            colored_print(f"[Setup] Ensuring model '{cfg['ollama_model']}' is available...", Colors.OKBLUE)
+            ensure_ollama_model(cfg["ollama_model"])
+        else:
+            colored_print("[Setup] Ollama still not available. You can switch to Gemini in Settings.", Colors.WARNING)
+
+    cfg["setup_completed"] = True
+    save_config(cfg)
+    return cfg
 
 # Global hotkey (macOS/Windows) via pynput
 if platform.system() in ("Darwin", "Windows"):
@@ -657,18 +799,19 @@ class FixedWindow:
         root.geometry("750x600+100+100")
         root.configure(bg=bg_root)
         
-        # Optional: if you want a window icon later, enable the following block
-        # try:
-        #     icon_img = load_image_icon("logo_m.png", (64, 64))
-        #     if icon_img:
-        #         import io
-        #         bio = io.BytesIO()
-        #         icon_img.save(bio, format='PNG')
-        #         bio.seek(0)
-        #         self.icon_photo = tk.PhotoImage(data=bio.read())
-        #         root.iconphoto(True, self.icon_photo)
-        # except Exception:
-        #     pass
+        # Set window icon to packaged/logo.png
+        try:
+            icon_path = find_asset("logo.png")
+            icon_img = load_image_icon(icon_path, (64, 64))
+            if icon_img:
+                import io
+                bio = io.BytesIO()
+                icon_img.save(bio, format='PNG')
+                bio.seek(0)
+                self.icon_photo = tk.PhotoImage(data=bio.read())
+                root.iconphoto(True, self.icon_photo)
+        except Exception:
+            pass
 
         # Store references for live theme application
         self.root = root
@@ -1023,7 +1166,7 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
     args = parse_args()
 
     # Hotkey daemon mode (separate process)
@@ -1036,6 +1179,8 @@ if __name__ == "__main__":
 
     # Pre-flight checks
     ensure_tesseract_binary()
+    # First-launch guided setup
+    ensure_provider_on_first_launch(args)
 
     # macOS guidance with colors
     try:
@@ -1077,3 +1222,6 @@ if __name__ == "__main__":
         headless_print_loop()
     else:
         gui_loop(args)
+
+if __name__ == "__main__":
+    main()

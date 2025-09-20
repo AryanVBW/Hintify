@@ -1,3 +1,26 @@
+Metadata-Version: 2.4
+Name: hintify
+Version: 0.1.1
+Summary: SnapAssist AI – real-time clipboard-to-hints assistant
+Author: Hintify Contributors
+License: MIT
+Project-URL: Homepage, https://github.com/AryanVBW/Hintify
+Keywords: education,ocr,ai,ollama,gemini,hints
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Education
+Classifier: Topic :: Education
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: pillow
+Requires-Dist: pytesseract
+Requires-Dist: keyring
+Requires-Dist: requests
+Requires-Dist: google-generativeai
+Requires-Dist: pynput
+Dynamic: license-file
+
 <div align="center">
   <img src="https://github.com/user-attachments/assets/59c6b462-f88f-4fa9-88b6-e64525878f33" 
        alt="Hintify Logo" height="280">

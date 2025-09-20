@@ -228,9 +228,9 @@ def query_with_gemini(prompt, model, api_key):
             return (getattr(resp, "text", None) or "").strip() or "[LLM Error] Empty response from Gemini"
         except Exception as inner:
             # Fallback to 1.5 if 2.5 not available for the user
-            if model != "gemini-1.5-flash":
+            if model != "gemini-2.0-flash":
                 try:
-                    fallback_model = "gemini-1.5-flash"
+                    fallback_model = "gemini-2.0-flash"
                     chat = genai.GenerativeModel(fallback_model)
                     resp = chat.generate_content(prompt)
                     return (getattr(resp, "text", None) or "").strip() or "[LLM Error] Empty response from Gemini"

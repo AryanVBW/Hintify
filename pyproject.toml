@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hintify"
-version = "0.1.1"
+version = "0.1.2"
 description = "SnapAssist AI – real-time clipboard-to-hints assistant"
 readme = "README.md"
 authors = [{ name = "Hintify Contributors" }]
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.9"
 keywords = ["education", "ocr", "ai", "ollama", "gemini", "hints"]
 classifiers = [

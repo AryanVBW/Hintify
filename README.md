@@ -1,9 +1,7 @@
 <div align="center">
-  <img src="https://github.com/user-attachments/assets/59c6b462-f88f-4fa9-88b6-e64525878f33" 
-       alt="Hintify Logo" height="280">
-  <p style="font-size:26px; font-weight:700; margin-top:16px;">
-    SnapAssist AI – Real-time Study Assistant
-  </p>
+  <img src="logo.png" alt="Hintify" height="160">
+  <h1>Hintify</h1>
+  <p><b>Take a screenshot → get gentle hints (not answers).</b></p>
 </div>
 <br>
 
@@ -51,11 +49,15 @@ Take a **screenshot of a question** (assignments, PDFs, exams, etc.). SnapAssist
 
 ---
 
-## 📦 Installation
+## 📦 Installation (Users)
 
-1) Python deps
+Install from PyPI (recommended):
 ```
-pip install -r requirements.txt
+pip install -U hintify
+```
+Then start:
+```
+hintify
 ```
 
 2) Install Tesseract (required)
@@ -67,23 +69,10 @@ pip install -r requirements.txt
 - Install Ollama from: `https://ollama.com/download`
 - The app will auto-pull the model on first run
 
-### Packaging / PyPI
-
-This project is ready for publishing to PyPI with `pyproject.toml` metadata and a console script entry (`hintify`).
-
-Steps:
-1. Build artifacts:
+If you prefer source install:
 ```
-python -m pip install --upgrade build twine
-python -m build
-```
-2. Upload:
-```
-python -m twine upload 'dist/*'
-```
-3. Install:
-```
-pip install hintify
+pip install -r requirements.txt
+python hintify.py
 ```
 
 4) Option B: Gemini API (cloud)
@@ -94,14 +83,8 @@ pip install hintify
 
 ## 🚀 Quickstart
 
-Run with GUI (default):
+Run from terminal after install:
 ```
-python hintify.py
-```
-
-Install via pip (once published on PyPI):
-```
-pip install hintify
 hintify
 ```
 

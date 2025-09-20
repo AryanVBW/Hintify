@@ -1,3 +1,4 @@
-pytesseract
 pillow
-pyobjc
+pytesseract
+google-generativeai
+keyring

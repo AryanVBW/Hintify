@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="logo.png" alt="Hintify" height="160">
+  <img src="logo_m.png" alt="Hintify" height="160">
   <h1>Hintify</h1>
   <p><b>Take a screenshot → get gentle hints (not answers).</b></p>
 </div>

@@ -9,6 +9,7 @@ import shutil
 import argparse
 import webbrowser
 from io import BytesIO
+import json
 from threading import Thread
 import queue
 
@@ -18,34 +19,56 @@ response_queue = queue.Queue()
 # 0. Setup & Dependency Helpers
 # -------------------------------
 
+DEBUG = False
+
+# Color codes for terminal output
+class Colors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def colored_print(text, color=None):
+    if color:
+        print(f"{color}{text}{Colors.ENDC}")
+    else:
+        print(text)
+
 def ensure_package(package, import_name=None, extra_args=None):
     import_name = import_name or package
     try:
         __import__(import_name)
         return True
     except Exception:
-        print(f"[Setup] Installing Python package '{package}'...")
+        colored_print(f"[Setup] Installing Python package '{package}'...", Colors.OKCYAN)
         cmd = [sys.executable, "-m", "pip", "install", package]
         if extra_args:
             cmd.extend(extra_args)
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, check=True)
             if res.stdout:
-                print(res.stdout.strip())
+                colored_print(res.stdout.strip(), Colors.OKGREEN)
             __import__(import_name)
             return True
         except subprocess.CalledProcessError as e:
-            print(f"[Setup] Failed to install '{package}': {e.stderr or e}")
+            colored_print(f"[Setup] Failed to install '{package}': {e.stderr or e}", Colors.FAIL)
             return False
 
 # Core deps
 ensure_package("pillow", "PIL")
 ensure_package("pytesseract")
 ensure_package("keyring")
+ensure_package("requests")
 
 from PIL import Image, ImageGrab  # type: ignore
 import pytesseract  # type: ignore
 import keyring  # type: ignore
+import requests  # type: ignore
 
 # Optional GUI
 try:
@@ -53,20 +76,215 @@ try:
 except Exception:
     tk = None  # type: ignore
 
-
+# Ensure Tesseract binary present (print guidance if missing)
 def ensure_tesseract_binary():
     if shutil.which("tesseract"):
         return True
-    print("[Setup] Tesseract OCR is not installed or not on PATH.")
+    colored_print("[Setup] Tesseract OCR is not installed or not on PATH.", Colors.WARNING)
     sysname = platform.system()
     if sysname == "Darwin":
-        print("[Setup] Install via Homebrew: 'brew install tesseract'")
+        colored_print("[Setup] Install via Homebrew: 'brew install tesseract'", Colors.OKCYAN)
     elif sysname == "Windows":
-        print("[Setup] Install via Chocolatey: 'choco install tesseract' or download from 'https://github.com/UB-Mannheim/tesseract/wiki'")
+        colored_print("[Setup] Install via Chocolatey: 'choco install tesseract' or download from 'https://github.com/UB-Mannheim/tesseract/wiki'", Colors.OKCYAN)
     else:
-        print("[Setup] Install via apt: 'sudo apt-get install tesseract-ocr' or your distro equivalent.")
+        colored_print("[Setup] Install via apt: 'sudo apt-get install tesseract-ocr' or your distro equivalent.", Colors.OKCYAN)
     return False
 
+# ---------------------------------
+# Sanitization & Formatting of Hints
+# ---------------------------------
+
+def sanitize_and_format_hints(raw_text):
+    """
+    Normalize model output into 3-5 'Hint N: ...' lines, stripping any final answers.
+    - Remove lines that reveal final numeric answers or exact options like '(B) 42'.
+    - Ensure between 3 and 5 hints; truncate extras, synthesize minimal hints if needed.
+    - Always end with a short encouragement line.
+    """
+    if not raw_text:
+        return "[LLM Error] Empty response"
+
+    text = raw_text.strip()
+    # Split into candidate lines
+    lines = [l.strip() for l in re.split(r"[\n\r]+", text) if l.strip()]
+
+    # Extract hint-like lines or bullet points
+    hint_lines = []
+    for line in lines:
+        lowered = line.lower()
+        # Skip obvious final answers
+        if re.search(r"\b(answer|final|equals|=)\b", lowered):
+            continue
+        if re.search(r"\boption\s*[abcd]\b", lowered):
+            continue
+        if re.search(r"\([A-D]\)\s*\S+", line):
+            continue
+        # Collect bullets or lines starting with Hint/Step
+        if re.match(r"^(hint|step)\s*\d*\s*[:\-]", lowered):
+            hint_lines.append(line)
+        elif re.match(r"^[\-\*•]", line):
+            hint_lines.append(re.sub(r"^[\-\*•]\s*", "", line))
+        else:
+            # Short, hinty sentences
+            if 3 <= len(line.split()) <= 30:
+                hint_lines.append(line)
+
+    # Deduplicate preserving order
+    seen = set()
+    filtered = []
+    for h in hint_lines:
+        k = h.lower()
+        if k not in seen:
+            seen.add(k)
+            filtered.append(h)
+
+    # Take 3 to 5
+    if len(filtered) < 3:
+        base = "Focus on identifying knowns, selecting a method, then setting up steps."
+        while len(filtered) < 3:
+            filtered.append(base)
+    filtered = filtered[:5]
+
+    # Number and label consistently
+    numbered = []
+    for i, h in enumerate(filtered, 1):
+        h = re.sub(r"^(hint|step)\s*\d*\s*[:\-]\s*", "", h, flags=re.IGNORECASE)
+        numbered.append(f"Hint {i}: {h}")
+
+    encouragement = "Now try completing the final step on your own."
+    return "\n".join(numbered + [encouragement])
+
+# ---------------------------------
+# Config (persisted settings)
+# ---------------------------------
+
+CONFIG_PATH = os.path.expanduser("~/.hintify_config.json")
+DEFAULT_CONFIG = {
+    "provider": "ollama",  # "ollama" | "gemini"
+    "ollama_model": "granite3.2-vision:2b",
+    "gemini_model": "gemini-2.0-flash",
+    "theme": "dark",  # "dark" | "light" | "glass"
+}
+
+
+def load_config():
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.loads(f.read() or "{}")
+            # Merge with defaults
+            merged = DEFAULT_CONFIG.copy()
+            merged.update(cfg or {})
+            return merged
+    except Exception:
+        pass
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(json.dumps(cfg, indent=2))
+        return True
+    except Exception as e:
+        colored_print(f"[Config] Failed to save config: {e}", Colors.FAIL)
+        return False
+
+def get_available_ollama_models():
+    """Get list of available Ollama models"""
+    try:
+        result = subprocess.run(["ollama", "list"], capture_output=True, text=True, check=True)
+        lines = result.stdout.strip().split('\n')[1:]  # Skip header
+        models = []
+        for line in lines:
+            if line.strip():
+                model_name = line.split()[0]
+                if model_name and model_name != "NAME":
+                    models.append(model_name)
+        return models
+    except Exception:
+        return ["granite3.2-vision:2b", "llama3.2:3b", "qwen2.5:7b"]
+
+def get_gemini_models():
+    """Get list of common Gemini models"""
+    return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+
+def load_image_icon(path, size=(32, 32)):
+    """Load and resize image for use as icon"""
+    try:
+        if os.path.exists(path):
+            img = Image.open(path)
+            img = img.resize(size, Image.Resampling.LANCZOS)
+            return img
+    except Exception as e:
+        colored_print(f"[UI] Failed to load icon {path}: {e}", Colors.WARNING)
+    return None
+
+# Global hotkey (macOS/Windows) via pynput
+if platform.system() in ("Darwin", "Windows"):
+    ensure_package("pynput")
+    try:
+        from pynput import keyboard  # type: ignore
+    except Exception:
+        keyboard = None  # type: ignore
+else:
+    keyboard = None  # type: ignore
+
+# -------------------------------
+# macOS/Windows Hotkey Daemon
+# -------------------------------
+
+def run_hotkey_daemon():
+    """Run a small daemon that registers a global hotkey and triggers capture.
+    This runs in a separate process so any crash won't bring down the main app.
+    """
+    sysname = platform.system()
+    if keyboard is None:
+        print("[Hotkey] Pynput unavailable; daemon exiting.")
+        return
+
+    def on_activate():
+        try:
+            if sysname == "Darwin":
+                subprocess.run(["screencapture", "-i", "-c"], check=True)
+            elif sysname == "Windows":
+                if shutil.which("explorer"):
+                    subprocess.Popen(["explorer", "ms-screenclip:"])
+        except Exception as e:
+            print(f"[Hotkey] Capture failed: {e}")
+
+    try:
+        if sysname == "Darwin":
+            combo = '<cmd>+<shift>+h'
+            print("[Hotkey] Daemon running. Global hotkey: Cmd+Shift+H")
+            mapping = {combo: on_activate}
+        elif sysname == "Windows":
+            combo = '<ctrl>+<shift>+h'
+            print("[Hotkey] Daemon running. Global hotkey: Ctrl+Shift+H")
+            mapping = {combo: on_activate}
+        else:
+            return
+        hk = keyboard.GlobalHotKeys(mapping)
+        hk.start()
+        # Keep the daemon alive
+        try:
+            while True:
+                time.sleep(60)
+        except KeyboardInterrupt:
+            pass
+    except Exception as e:
+        print(f"[Hotkey] Daemon error: {e}")
+        if sysname == "Darwin":
+            print("[Hotkey] Grant Accessibility permission to your terminal/app in System Settings.")
+
+
+def start_hotkey_daemon_subprocess():
+    """Spawn the hotkey daemon subprocess; ignore failure."""
+    try:
+        subprocess.Popen([sys.executable, __file__, "--hotkey-daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("[Hotkey] Global hotkey daemon started (use Cmd+Shift+H on macOS, Ctrl+Shift+H on Windows).")
+    except Exception as e:
+        print(f"[Hotkey] Could not start daemon: {e}")
 
 # -------------------------------
 # 1. Screenshot Detection & OCR
@@ -143,7 +361,7 @@ def detect_difficulty(text):
 
 
 # -------------------------------
-# 4. Prompt + LLM Providers (Ollama and Gemini)
+# 4. Prompt + LLM Providers (Ollama only)
 # -------------------------------
 
 def build_prompt(text, qtype, difficulty):
@@ -209,59 +427,85 @@ def query_with_ollama(prompt, model):
         return "[Setup] Ollama CLI not found. Install from https://ollama.com/download and ensure 'ollama' is in your PATH."
     ensure_ollama_model(model)
     try:
-        result = subprocess.run(["ollama", "run", model], input=prompt, text=True, capture_output=True, check=True)
+        if DEBUG:
+            print(f"[LLM] Calling Ollama model='{model}' (len(prompt)={len(prompt)})")
+        result = subprocess.run(["ollama", "run", model], input=prompt, text=True, capture_output=True, check=True, timeout=120)
         return result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        return "[LLM Error] Ollama request timed out. Try a smaller prompt or different model."
     except subprocess.CalledProcessError as e:
         return f"[LLM Error] {e.stderr or str(e)}"
 
 
 def query_with_gemini(prompt, model, api_key):
-    ok = ensure_package("google-generativeai", "google.generativeai")
-    if not ok:
-        return "[Setup] Failed to install google-generativeai. Please run: pip install google-generativeai"
+    """Call Gemini via REST API, with fallback to gemini-1.5-flash if needed."""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    headers = {"Content-Type": "application/json", "X-goog-api-key": api_key}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
     try:
-        import google.generativeai as genai  # type: ignore
-        genai.configure(api_key=api_key)
-        try:
-            chat = genai.GenerativeModel(model)
-            resp = chat.generate_content(prompt)
-            return (getattr(resp, "text", None) or "").strip() or "[LLM Error] Empty response from Gemini"
-        except Exception as inner:
-            # Fallback to 1.5 if 2.5 not available for the user
-            if model != "gemini-2.0-flash":
-                try:
-                    fallback_model = "gemini-2.0-flash"
-                    chat = genai.GenerativeModel(fallback_model)
-                    resp = chat.generate_content(prompt)
-                    return (getattr(resp, "text", None) or "").strip() or "[LLM Error] Empty response from Gemini"
-                except Exception:
-                    raise inner
-            else:
-                raise inner
+        if DEBUG:
+            print(f"[LLM] Calling Gemini REST model='{model}' (len(prompt)={len(prompt)})")
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code == 404 or resp.status_code == 403:
+            # Not found / not allowed -> fallback
+            fallback_model = "gemini-1.5-flash"
+            if model != fallback_model:
+                if DEBUG:
+                    print(f"[LLM] Falling back to Gemini REST model='{fallback_model}' (status={resp.status_code})")
+                return query_with_gemini(prompt, fallback_model, api_key)
+        if resp.status_code != 200:
+            return f"[LLM Error] Gemini HTTP {resp.status_code}: {resp.text.strip()}"
+        data = resp.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return "[LLM Error] Empty response from Gemini"
+        parts = ((candidates[0] or {}).get("content") or {}).get("parts") or []
+        texts = []
+        for part in parts:
+            t = part.get("text")
+            if isinstance(t, str) and t.strip():
+                texts.append(t.strip())
+        text = "\n".join(texts).strip()
+        return text or "[LLM Error] Empty response from Gemini"
+    except requests.Timeout:
+        return "[LLM Error] Gemini request timed out. Try again later."
     except Exception as e:
         return f"[LLM Error] {e}"
 
 
 def generate_hints(text, qtype, difficulty, args):
     prompt = build_prompt(text, qtype, difficulty)
-    provider = (os.getenv("HINTIFY_PROVIDER") or args.provider or "").lower()
+    cfg = load_config()
+    provider = (cfg.get("provider") or "ollama").lower()
+    ollama_model = cfg.get("ollama_model") or os.getenv("HINTIFY_OLLAMA_MODEL") or args.ollama_model
+    gem_model = cfg.get("gemini_model") or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     gem_key = os.getenv("GEMINI_API_KEY") or (keyring.get_password("hintify", "gemini_api_key") or None)
-    ollama_model = os.getenv("HINTIFY_OLLAMA_MODEL") or args.ollama_model
-    gem_model = os.getenv("GEMINI_MODEL") or args.gemini_model
 
+    if DEBUG:
+        print(f"[Flow] Provider='ollama', qtype='{qtype}', difficulty='{difficulty}'")
+
+    if provider == "ollama" and have_ollama():
+        ok = ensure_ollama_model(ollama_model)
+        if not ok:
+            return "[Setup] Failed to pull required Ollama model. Please try again."
+        raw = query_with_ollama(prompt, ollama_model)
+        return sanitize_and_format_hints(raw)
     if provider == "gemini":
         if not gem_key:
             return "[Setup] GEMINI_API_KEY not set. Export GEMINI_API_KEY to use Gemini."
-        return query_with_gemini(prompt, gem_model, gem_key)
+        raw = query_with_gemini(prompt, gem_model, gem_key)
+        return sanitize_and_format_hints(raw)
 
-    # Default to Ollama if available; otherwise fallback to Gemini if API key exists
+    # Auto fallback: if configured provider unavailable
     if have_ollama():
-        # Ensure model pulled before first use
-        ensure_ollama_model(ollama_model)
-        return query_with_ollama(prompt, ollama_model)
+        ok = ensure_ollama_model(ollama_model)
+        if ok:
+            raw = query_with_ollama(prompt, ollama_model)
+            return sanitize_and_format_hints(raw)
     if gem_key:
-        print("[Info] Ollama not found. Falling back to Gemini.")
-        return query_with_gemini(prompt, gem_model, gem_key)
+        raw = query_with_gemini(prompt, gem_model, gem_key)
+        return sanitize_and_format_hints(raw)
     return "[Setup] No LLM provider available. Install Ollama or set GEMINI_API_KEY."
 
 
@@ -270,7 +514,7 @@ def generate_hints(text, qtype, difficulty, args):
 # -------------------------------
 
 def monitor_clipboard(args):
-    print("🔍 SnapAssist AI is running... Press Ctrl+C to stop.")
+    colored_print("🔍 SnapAssist AI is running... Press Ctrl+C to stop.", Colors.HEADER)
     last_hash = None
 
     while True:
@@ -280,76 +524,476 @@ def monitor_clipboard(args):
                 current_hash = hashlib.md5(image_bytes).hexdigest()
                 if current_hash != last_hash:
                     last_hash = current_hash
-                    print("📸 Screenshot detected. Processing...")
+                    colored_print("📸 Screenshot detected. Processing...", Colors.OKCYAN)
 
                     text = extract_text_from_image(image_bytes)
                     if not text:
-                        print("⚠️ No text found in the screenshot.")
+                        colored_print("⚠️ No text found in the screenshot.", Colors.WARNING)
                         time.sleep(args.poll_interval)
                         continue
 
                     qtype = classify_question(text)
                     difficulty = detect_difficulty(text)
 
-                    print(f"🧠 Detected Question Type: {qtype}, Difficulty: {difficulty}")
+                    colored_print(f"🧠 Detected Question Type: {qtype}, Difficulty: {difficulty}", Colors.OKBLUE)
                     response = generate_hints(text, qtype, difficulty, args)
 
                     response_queue.put(response)
 
             time.sleep(args.poll_interval)
         except KeyboardInterrupt:
-            print("\n🛑 SnapAssist AI stopped.")
+            colored_print("\n🛑 SnapAssist AI stopped.", Colors.FAIL)
             break
         except Exception as e:
-            print(f"[Error] {e}")
+            colored_print(f"[Error] {e}", Colors.FAIL)
             time.sleep(max(1.0, args.poll_interval))
 
+
+def process_clipboard_once(args):
+    """Process current clipboard image immediately if present."""
+    image_bytes = get_clipboard_image_bytes()
+    if not image_bytes:
+        print("⚠️ No image found in the clipboard.")
+        return
+    text = extract_text_from_image(image_bytes)
+    if not text or text.startswith("[OCR Error]"):
+        print(text or "⚠️ No text found in the screenshot.")
+        return
+    qtype = classify_question(text)
+    difficulty = detect_difficulty(text)
+    print(f"🧠 Detected Question Type: {qtype}, Difficulty: {difficulty}")
+    response = generate_hints(text, qtype, difficulty, args)
+    response_queue.put(response)
+
+
+# -------------------------------
+# 5b. On-demand Capture Helpers
+# -------------------------------
+
+def trigger_macos_selection_capture():
+    try:
+        subprocess.run(["screencapture", "-i", "-c"], check=True)
+        return True
+    except Exception as e:
+        print(f"[macOS] Failed to capture selection: {e}")
+        return False
+
+
+def trigger_windows_selection_capture():
+    try:
+        if shutil.which("explorer"):
+            subprocess.Popen(["explorer", "ms-screenclip:"])
+            return True
+        return False
+    except Exception as e:
+        print(f"[Windows] Failed to start screen clip: {e}")
+        return False
+
+
+def capture_and_process(args):
+    sysname = platform.system()
+    ok = False
+    if sysname == "Darwin":
+        ok = trigger_macos_selection_capture()
+    elif sysname == "Windows":
+        ok = trigger_windows_selection_capture()
+
+    # After triggering, poll clipboard briefly for the image and process
+    if ok:
+        deadline = time.time() + (5 if sysname == "Darwin" else 12)
+        while time.time() < deadline:
+            image_bytes = get_clipboard_image_bytes()
+            if image_bytes:
+                process_clipboard_once(args)
+                return
+            time.sleep(0.25)
+        print("⚠️ Timed out waiting for captured image on clipboard.")
 
 # -------------------------------
 # 6. Fixed Window GUI (optional)
 # -------------------------------
 
 class FixedWindow:
-    def __init__(self, root):
-        root.title("SnapAssist AI - Hints")
-        root.geometry("500x400+100+100")
-        root.configure(bg="white")
+    def __init__(self, root, args):
+        cfg = load_config()
+        theme = (cfg.get("theme") or "dark").lower()
 
-        frame = tk.Frame(root, bg="white", padx=10, pady=10)
-        frame.pack(fill="both", expand=True)
+        # Enhanced theme tokens with glass effects
+        if theme == "light":
+            bg_root = "#f8fafc"
+            fg_text = "#0f172a"
+            panel_bg = "#ffffff"
+            panel_alpha = "#ffffff"
+            border = "#e2e8f0"
+            accent = "#2563eb"
+            accent_text = "#ffffff"
+            label_color = "#1d4ed8"
+            enc_color = "#059669"
+            glass_bg = "#f1f5f9"
+        elif theme == "glass":
+            bg_root = "#1e293b"
+            fg_text = "#f1f5f9"
+            panel_bg = "#334155"
+            panel_alpha = "#334155"  # Tkinter doesn't support alpha; using solid color
+            border = "#475569"
+            accent = "#06b6d4"
+            accent_text = "#0f172a"
+            label_color = "#38bdf8"
+            enc_color = "#10b981"
+            glass_bg = "#1e293b"  # Solid fallback without alpha
+        else:  # dark
+            bg_root = "#0f172a"
+            fg_text = "#e5e7eb"
+            panel_bg = "#111827"
+            panel_alpha = "#111827"
+            border = "#1f2937"
+            accent = "#22c55e"
+            accent_text = "#0f172a"
+            label_color = "#93c5fd"
+            enc_color = "#86efac"
+            glass_bg = "#111827"
 
+        root.title("SnapAssist AI")
+        root.geometry("750x600+100+100")
+        root.configure(bg=bg_root)
+        
+        # Optional: if you want a window icon later, enable the following block
+        # try:
+        #     icon_img = load_image_icon("logo_m.png", (64, 64))
+        #     if icon_img:
+        #         import io
+        #         bio = io.BytesIO()
+        #         icon_img.save(bio, format='PNG')
+        #         bio.seek(0)
+        #         self.icon_photo = tk.PhotoImage(data=bio.read())
+        #         root.iconphoto(True, self.icon_photo)
+        # except Exception:
+        #     pass
+
+        # Store references for live theme application
+        self.root = root
+        self.args = args
+        self._cfg = cfg
+        self._theme = theme
+        self._theme_tokens = {
+            "bg_root": bg_root,
+            "fg_text": fg_text,
+            "panel_bg": panel_bg,
+            "panel_alpha": panel_alpha,
+            "border": border,
+            "accent": accent,
+            "accent_text": accent_text,
+            "label_color": label_color,
+            "enc_color": enc_color,
+            "glass_bg": glass_bg,
+        }
+
+        # Main container with glass effect
+        main_frame = tk.Frame(root, bg=glass_bg if theme == "glass" else bg_root)
+        main_frame.pack(fill="both", expand=True, padx=8, pady=8)
+        self.main_frame = main_frame
+
+        # Top bar with logo and buttons
+        # Clean navigation bar with solid background and no stray stripes
+        topbar = tk.Frame(main_frame, bg=panel_bg, relief="flat", bd=0, highlightthickness=0)
+        topbar.pack(fill="x", padx=0, pady=(0, 8))
+        self.topbar = topbar
+
+        # Logo and title section
+        title_frame = tk.Frame(topbar, bg=panel_bg, highlightthickness=0, bd=0)
+        title_frame.pack(side="left", fill="y")
+        self.title_frame = title_frame
+
+        # Logo intentionally removed per request for a cleaner headert
+
+        title = tk.Label(title_frame, text="SnapAssist AI", fg=fg_text, bg=panel_bg, font=("SF Pro Display", 18, "bold"))
+        title.pack(side="left", padx=12, pady=8)
+        self.title_label = title
+
+        # Action buttons with proper styling
+        buttons_frame = tk.Frame(topbar, bg=panel_bg, highlightthickness=0, bd=0)
+        buttons_frame.pack(side="right", padx=12, pady=6)
+        self.buttons_frame = buttons_frame
+
+        # Load button icons
+        try:
+            settings_img = load_image_icon("settings-94.png", (24, 24))
+            capture_img = load_image_icon("screenshot-64.png", (24, 24))
+            
+            if settings_img:
+                import io
+                bio = io.BytesIO()
+                settings_img.save(bio, format='PNG')
+                bio.seek(0)
+                self.settings_photo = tk.PhotoImage(data=bio.read())
+            if capture_img:
+                import io
+                bio = io.BytesIO()
+                capture_img.save(bio, format='PNG')
+                bio.seek(0)
+                self.capture_photo = tk.PhotoImage(data=bio.read())
+        except Exception:
+            self.settings_photo = None
+            self.capture_photo = None
+
+        # Settings button with integrated look
+        self.settings_btn = tk.Button(
+            buttons_frame,
+            image=getattr(self, 'settings_photo', None) or None,
+            text="⚙" if not hasattr(self, 'settings_photo') else "",
+            command=lambda: self.open_settings(args),
+            bg=panel_bg,
+            fg=fg_text,
+            activebackground=border,
+            activeforeground=fg_text,
+            relief="flat",
+            bd=0,
+            padx=8,
+            pady=8,
+        )
+        self.settings_btn.pack(side="right", padx=(8, 0))
+
+        # Capture button with integrated look
+        self.capture_btn = tk.Button(
+            buttons_frame,
+            image=getattr(self, 'capture_photo', None) or None,
+            text="📸" if not hasattr(self, 'capture_photo') else "",
+            command=lambda: capture_and_process(args),
+            bg=accent,
+            fg=accent_text,
+            activebackground=accent,
+            activeforeground=accent_text,
+            relief="flat",
+            bd=0,
+            padx=12,
+            pady=8,
+        )
+        self.capture_btn.pack(side="right", padx=(0, 8))
+
+        # Content area with glass effect
+        content_bg = panel_alpha if theme == "glass" else panel_bg
+        content = tk.Frame(main_frame, bg=content_bg, relief="flat", bd=1, highlightbackground=border, highlightthickness=1)
+        content.pack(fill="both", expand=True)
+        self.content = content
+
+        # Text display with glass styling
+        text_container = tk.Frame(content, bg=content_bg)
+        text_container.pack(fill="both", expand=True, padx=12, pady=12)
+        self.text_container = text_container
+
+        # Scrollbar
+        scrollbar = tk.Scrollbar(text_container, bg=panel_bg, troughcolor=border)
+        scrollbar.pack(side="right", fill="y")
+        self.scrollbar = scrollbar
+
+        # Text widget with glass transparency
         self.text_widget = tk.Text(
-            frame, wrap="word", bg="white", fg="black", font=("Helvetica", 16)
+            text_container,
+            wrap="word",
+            bg=content_bg,
+            fg=fg_text,
+            insertbackground=fg_text,
+            font=("SF Pro Text", 15),
+            relief="flat",
+            bd=0,
+            padx=16,
+            pady=16,
+            yscrollcommand=scrollbar.set,
         )
         self.text_widget.config(state="disabled")
         self.text_widget.pack(fill="both", expand=True)
+        scrollbar.config(command=self.text_widget.yview)
+
+        # Text styling tags
+        self.text_widget.tag_configure("hint_label", font=("SF Pro Text", 16, "bold"), foreground=label_color)
+        self.text_widget.tag_configure("hint_text", font=("SF Pro Text", 15), foreground=fg_text)
+        self.text_widget.tag_configure("enc", font=("SF Pro Text", 14, "italic"), foreground=enc_color)
+
+        # Keyboard shortcut
+        try:
+            root.bind_all('<Key-c>', lambda e: capture_and_process(args))
+        except Exception:
+            pass
+
+    def apply_theme(self, theme):
+        theme = (theme or "dark").lower()
+        if theme == "light":
+            tokens = {
+                "bg_root": "#f8fafc",
+                "fg_text": "#0f172a",
+                "panel_bg": "#ffffff",
+                "border": "#e2e8f0",
+                "accent": "#2563eb",
+                "accent_text": "#ffffff",
+                "label_color": "#1d4ed8",
+                "enc_color": "#059669",
+            }
+        elif theme == "glass":
+            tokens = {
+                "bg_root": "#e5e7eb",
+                "fg_text": "#0f172a",
+                "panel_bg": "#ffffff",
+                "border": "#cbd5e1",
+                "accent": "#10b981",
+                "accent_text": "#0b1320",
+                "label_color": "#0ea5e9",
+                "enc_color": "#059669",
+            }
+        else:
+            tokens = {
+                "bg_root": "#0f172a",
+                "fg_text": "#e5e7eb",
+                "panel_bg": "#111827",
+                "border": "#1f2937",
+                "accent": "#22c55e",
+                "accent_text": "#0b1320",
+                "label_color": "#93c5fd",
+                "enc_color": "#86efac",
+            }
+        self._theme = theme
+        self._theme_tokens = tokens
+        # Apply to widgets
+        self.root.configure(bg=tokens["bg_root"])
+        self.topbar.configure(bg=tokens["bg_root"])
+        self.title_label.configure(bg=tokens["bg_root"], fg=tokens["fg_text"])
+        self.buttons_frame.configure(bg=tokens["bg_root"])
+        self.settings_btn.configure(bg=tokens["panel_bg"], fg=tokens["fg_text"], activebackground=tokens["panel_bg"], activeforeground=tokens["fg_text"])
+        self.capture_btn.configure(bg=tokens["accent"], fg=tokens["accent_text"], activebackground=tokens["accent"], activeforeground=tokens["accent_text"])
+        self.content.configure(bg=tokens["panel_bg"], highlightbackground=tokens["border"])
+        # text_frame no longer used; configure text_container instead
+        if hasattr(self, "text_container"):
+            self.text_container.configure(bg=tokens["panel_bg"]) 
+        self.text_widget.configure(bg=tokens["panel_bg"], fg=tokens["fg_text"], insertbackground=tokens["fg_text"])
+        self.text_widget.tag_configure("hint_label", foreground=tokens["label_color"]) 
+        self.text_widget.tag_configure("hint_text", foreground=tokens["fg_text"]) 
+        self.text_widget.tag_configure("enc", foreground=tokens["enc_color"]) 
 
     def show(self, response):
         if not self.text_widget.winfo_exists():
             return
         self.text_widget.config(state="normal")
         self.text_widget.delete("1.0", tk.END)
-        self.text_widget.insert("1.0", response)
+        # Pretty-print hints: bold labels, styled text
+        lines = [l for l in (response or "").splitlines()]
+        for idx, line in enumerate(lines):
+            m = re.match(r"^(Hint\s+\d+:)(\s*)(.*)$", line.strip())
+            if m:
+                label, spaces, rest = m.group(1), m.group(2), m.group(3)
+                self.text_widget.insert(tk.END, label, ("hint_label",))
+                self.text_widget.insert(tk.END, spaces or " ")
+                self.text_widget.insert(tk.END, rest + "\n", ("hint_text",))
+            elif line.strip().lower().startswith("now try") or line.strip().lower().startswith("work carefully"):
+                self.text_widget.insert(tk.END, line + "\n", ("enc",))
+            else:
+                self.text_widget.insert(tk.END, line + "\n", ("hint_text",))
         self.text_widget.config(state="disabled")
 
+    def open_settings(self, args):
+        cfg = load_config()
+        top = tk.Toplevel()
+        top.title("Settings")
+        top.geometry("460x380+140+140")
+        t = self._theme_tokens
+        top.configure(bg=t["panel_bg"])
 
-def gui_loop():
+        # Provider
+        provider_var = tk.StringVar(value=cfg.get("provider", "ollama"))
+        tk.Label(top, text="Provider", bg=t["panel_bg"], fg=t["fg_text"]).pack(anchor="w", padx=12, pady=(12,2))
+        provider_menu = tk.OptionMenu(top, provider_var, "ollama", "gemini")
+        provider_menu.pack(fill="x", padx=12)
+
+        # Models
+        tk.Label(top, text="Ollama model", bg=t["panel_bg"], fg=t["fg_text"]).pack(anchor="w", padx=12, pady=(12,2))
+        ollama_var = tk.StringVar(value=cfg.get("ollama_model", "granite3.2-vision:2b"))
+        tk.Entry(top, textvariable=ollama_var).pack(fill="x", padx=12)
+
+        tk.Label(top, text="Gemini model", bg=t["panel_bg"], fg=t["fg_text"]).pack(anchor="w", padx=12, pady=(12,2))
+        gem_var = tk.StringVar(value=cfg.get("gemini_model", "gemini-2.0-flash"))
+        tk.Entry(top, textvariable=gem_var).pack(fill="x", padx=12)
+
+        # Gemini API key
+        tk.Label(top, text="Gemini API key", bg=t["panel_bg"], fg=t["fg_text"]).pack(anchor="w", padx=12, pady=(12,2))
+        current_key = os.getenv("GEMINI_API_KEY") or (keyring.get_password("hintify", "gemini_api_key") or "")
+        key_var = tk.StringVar(value=current_key)
+        key_entry = tk.Entry(top, textvariable=key_var, show="•")
+        key_entry.pack(fill="x", padx=12)
+
+        # Theme
+        tk.Label(top, text="Theme", bg=t["panel_bg"], fg=t["fg_text"]).pack(anchor="w", padx=12, pady=(12,2))
+        theme_var = tk.StringVar(value=cfg.get("theme", "dark"))
+        theme_menu = tk.OptionMenu(top, theme_var, "dark", "light", "glass")
+        theme_menu.pack(fill="x", padx=12)
+
+        btns = tk.Frame(top, bg=t["panel_bg"])
+        btns.pack(fill="x", pady=12)
+
+        def save_key():
+            val = (key_var.get() or "").strip()
+            if val:
+                try:
+                    keyring.set_password("hintify", "gemini_api_key", val)
+                    os.environ["GEMINI_API_KEY"] = val
+                    print("[Settings] Gemini API key saved to keychain.")
+                except Exception as e:
+                    print(f"[Settings] Failed to save key: {e}")
+
+        def clear_key():
+            try:
+                keyring.delete_password("hintify", "gemini_api_key")
+                if "GEMINI_API_KEY" in os.environ:
+                    del os.environ["GEMINI_API_KEY"]
+                key_var.set("")
+                print("[Settings] Gemini API key cleared.")
+            except Exception as e:
+                print(f"[Settings] Failed to clear key: {e}")
+
+        def save_and_apply():
+            new_cfg = {
+                "provider": provider_var.get(),
+                "ollama_model": ollama_var.get().strip() or "granite3.2-vision:2b",
+                "gemini_model": gem_var.get().strip() or "gemini-2.0-flash",
+                "theme": theme_var.get(),
+            }
+            save_config(new_cfg)
+            # Save key if provided
+            if key_var.get().strip():
+                save_key()
+            # Apply theme live
+            self.apply_theme(new_cfg["theme"])
+            top.destroy()
+            print("[Settings] Saved.")
+
+        tk.Button(btns, text="Save", command=save_and_apply, bg=t["accent"], fg=t["accent_text"], relief="flat").pack(side="right", padx=(6,12))
+        tk.Button(btns, text="Save key", command=save_key, relief="groove").pack(side="left", padx=12)
+        tk.Button(btns, text="Clear key", command=clear_key, relief="groove").pack(side="left")
+        tk.Button(btns, text="Cancel", command=top.destroy, relief="groove").pack(side="right")
+
+
+def headless_print_loop():
+    try:
+        while True:
+            try:
+                response = response_queue.get(timeout=0.5)
+                if response:
+                    print("\n📘 Hints:\n" + response + "\n")
+            except Exception:
+                pass
+    except KeyboardInterrupt:
+        return
+
+
+def gui_loop(args):
     if tk is None:
         print("[GUI] tkinter not available. Running in headless mode.")
-        # Headless: print responses as they arrive
-        try:
-            while True:
-                try:
-                    response = response_queue.get(timeout=0.5)
-                    if response:
-                        print("\n📘 Hints:\n" + response + "\n")
-                except Exception:
-                    pass
-        except KeyboardInterrupt:
-            return
-
-    root = tk.Tk()
-    app = FixedWindow(root)
+        headless_print_loop()
+        return
+    try:
+        root = tk.Tk()
+    except Exception as e:
+        print(f"[GUI] Failed to initialize tkinter GUI ({e}). Falling back to headless mode.")
+        headless_print_loop()
+        return
+    app = FixedWindow(root, args)
 
     def poll_queue():
         while not response_queue.empty():
@@ -369,67 +1013,67 @@ def parse_args():
     parser = argparse.ArgumentParser(description="SnapAssist AI - cross-platform clipboard-to-hints")
     parser.add_argument("--no-gui", action="store_true", help="Run without tkinter GUI")
     parser.add_argument("--poll-interval", type=float, default=1.5, help="Clipboard polling interval in seconds")
-    parser.add_argument("--provider", choices=["ollama", "gemini"], default=None, help="Force provider (overrides env HINTIFY_PROVIDER)")
-    parser.add_argument("--ollama-model", default=os.getenv("HINTIFY_OLLAMA_MODEL", "llama3.2:3b"), help="Ollama model to use")
-    parser.add_argument("--gemini-model", default=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), help="Gemini model to use")
+    # Provider is no longer selectable; we keep the flag for compatibility but ignore it
+    parser.add_argument("--provider", choices=["ollama", "gemini"], default=None, help="(Ignored) Provider selection; Ollama is enforced")
+    parser.add_argument("--ollama-model", default=os.getenv("HINTIFY_OLLAMA_MODEL", "granite3.2-vision:2b"), help="Ollama model to use")
+    parser.add_argument("--gemini-model", default=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"), help="(Unused) Gemini model")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--capture-now", action="store_true", help="Immediately prompt to select an area and process once")
+    parser.add_argument("--hotkey-daemon", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
 
+    # Hotkey daemon mode (separate process)
+    if getattr(args, "hotkey_daemon", False):
+        run_hotkey_daemon()
+        sys.exit(0)
+
+    # Set debug flag
+    DEBUG = getattr(args, "debug", False)
+
     # Pre-flight checks
     ensure_tesseract_binary()
-    if not have_ollama():
-        print("[Info] Ollama not detected. To install: macOS 'brew install ollama', Windows 'winget install Ollama.Ollama', Linux see https://ollama.com/download")
-        # Offer Gemini onboarding if no key is configured
-        stored_key = keyring.get_password("hintify", "gemini_api_key")
-        if not os.getenv("GEMINI_API_KEY") and not stored_key:
-            print("[Setup] You can use Google's Gemini as an alternative.")
-            try:
-                choice = input("Open Gemini API key page in your browser now? [Y/n]: ").strip().lower()
-            except Exception:
-                choice = "y"
-            if choice in ("", "y", "yes"): 
-                try:
-                    webbrowser.open("https://aistudio.google.com/apikey", new=2)
-                    print("[Setup] Opened: https://aistudio.google.com/apikey")
-                except Exception as e:
-                    print(f"[Setup] Please visit https://aistudio.google.com/apikey (auto-open failed: {e})")
-            try:
-                pasted = input("Paste your Gemini API key here (or press Enter to skip): ").strip()
-            except Exception:
-                pasted = ""
-            if pasted:
-                os.environ["GEMINI_API_KEY"] = pasted
-                try:
-                    keyring.set_password("hintify", "gemini_api_key", pasted)
-                    print("[Setup] Gemini API key saved securely to system keychain.")
-                except Exception as e:
-                    print(f"[Setup] Could not save key to keychain: {e}")
-                if not args.provider:
-                    args.provider = "gemini"
-                print("[Setup] GEMINI_API_KEY set for this session. To persist, export it in your shell profile.")
-        elif stored_key and not os.getenv("GEMINI_API_KEY"):
-            os.environ["GEMINI_API_KEY"] = stored_key
-            if not args.provider:
-                args.provider = "gemini"
-            print("[Setup] Using Gemini API key from system keychain.")
 
-    # Start threads
+    # macOS guidance with colors
+    try:
+        if platform.system() == "Darwin":
+            colored_print("[macOS] Tip: Use Cmd+Ctrl+Shift+4 to copy a selection screenshot to the clipboard.", Colors.OKCYAN)
+            colored_print("[macOS] Or use Cmd+Ctrl+Shift+5 → Options → Clipboard to copy captures.", Colors.OKCYAN)
+            colored_print("[macOS] Global capture hotkey: Cmd+Shift+H (grant Accessibility permission if needed).", Colors.HEADER)
+    except Exception:
+        pass
+
+    if not have_ollama():
+        colored_print("[Setup] Ollama not detected. Install from https://ollama.com/download", Colors.WARNING)
+        if platform.system() == "Darwin":
+            colored_print("[Setup] On macOS: brew install --cask ollama", Colors.OKCYAN)
+        else:
+            colored_print("[Setup] See install instructions for your OS at https://ollama.com/download", Colors.OKCYAN)
+        try:
+            webbrowser.open("https://ollama.com/download", new=2)
+        except Exception:
+            pass
+        sys.exit(1)
+
+    # Ensure the required model is present before starting
+    if not ensure_ollama_model(args.ollama_model):
+        colored_print("[Setup] Could not ensure the required Ollama model. Please check your network and try again.", Colors.FAIL)
+        sys.exit(1)
+
+    # Start hotkey daemon subprocess (won't crash main app if it fails)
+    start_hotkey_daemon_subprocess()
+
+    # Optional immediate capture
+    if getattr(args, "capture_now", False) and platform.system() == "Darwin":
+        capture_and_process(args)
+
+    # Start clipboard monitor thread
     Thread(target=monitor_clipboard, args=(args,), daemon=True).start()
 
     if args.no_gui:
-        # Headless loop that prints responses
-        try:
-            while True:
-                try:
-                    response = response_queue.get(timeout=0.5)
-                    if response:
-                        print("\n📘 Hints:\n" + response + "\n")
-                except Exception:
-                    pass
-        except KeyboardInterrupt:
-            pass
+        headless_print_loop()
     else:
-        gui_loop()
+        gui_loop(args)

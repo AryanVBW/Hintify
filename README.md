@@ -1,4 +1,11 @@
-# 📘 SnapAssist AI – Real-time Study Assistant
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/59c6b462-f88f-4fa9-88b6-e64525878f33" 
+       alt="Hintify Logo" height="280">
+  <p style="font-size:26px; font-weight:700; margin-top:16px;">
+    SnapAssist AI – Real-time Study Assistant
+  </p>
+</div>
+<br>
 
 SnapAssist AI is a **real-time AI-powered study assistant** that helps students solve problems independently by giving **progressive hints instead of direct answers**.
 
@@ -22,6 +29,7 @@ Take a **screenshot of a question** (assignments, PDFs, exams, etc.). SnapAssist
 - ⬇️ **Auto-pull Ollama model** – Ensures the selected model is available before first use
 - 🔐 **Keychain storage** – Saves Gemini API key securely via `keyring` (one-time setup)
 - 🖥️ **GUI or headless** – Tkinter GUI if available, otherwise prints to console
+- Beautiful, distraction-free UI with styled hints (bold labels, soft colors)
 
 ---
 
@@ -39,7 +47,7 @@ Take a **screenshot of a question** (assignments, PDFs, exams, etc.). SnapAssist
 **External Tools**
 
 - **Tesseract OCR** → Text recognition
-- **Ollama** → Local AI inference (default model `llama3.2:3b`)
+- **Ollama** → Local AI inference (default model `granite3.2-vision:2b`)
 
 ---
 
@@ -72,12 +80,20 @@ Run with GUI (default):
 python hintify.py
 ```
 
+Hotkeys:
+- macOS (global): Cmd+Shift+H to capture (may require Accessibility permission)
+- Windows (global): Ctrl+Shift+H to capture (opens Snipping Tool)
+- In-app: press 'c' while the window is focused, or click Capture
+
 Headless mode (no tkinter installed):
 ```
 python hintify.py --no-gui
 ```
 
 Take a screenshot and copy it to the clipboard. Hints will appear automatically.
+
+- GUI extras:
+  - Click the "Capture (press 'c')" button or press 'c' while the window is focused to select an area and process it immediately (macOS).
 
 ---
 
@@ -87,17 +103,17 @@ CLI options:
 ```
 python hintify.py \
   --provider {ollama|gemini} \
-  --ollama-model llama3.2:3b \
-  --gemini-model gemini-2.5-flash \
+  --ollama-model granite3.2-vision:2b \
+  --gemini-model gemini-2.0-flash \
   --poll-interval 1.5 \
   --no-gui
 ```
 
 Environment variables:
 - `HINTIFY_PROVIDER` – Force provider (`ollama` or `gemini`)
-- `HINTIFY_OLLAMA_MODEL` – Ollama model ID (default `llama3.2:3b`)
+- `HINTIFY_OLLAMA_MODEL` – Ollama model ID (default `granite3.2-vision:2b`)
 - `GEMINI_API_KEY` – Gemini API key
-- `GEMINI_MODEL` – Gemini model ID (default `gemini-2.5-flash`; auto-fallback to `gemini-1.5-flash`)
+- `GEMINI_MODEL` – Gemini model ID (default `gemini-2.0-flash`; auto-fallback to `gemini-1.5-flash`)
 
 Provider behavior:
 - If Ollama is installed, the app uses Ollama and auto-pulls the model if missing

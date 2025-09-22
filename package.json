@@ -1,0 +1,60 @@
+{
+  "name": "hintify",
+  "version": "1.0.0",
+  "description": "Hintify - AI-Powered Study Assistant with Electron app and Next.js website",
+  "private": true,
+  "workspaces": [
+    "Hintify_app",
+    "Hintidy_website"
+  ],
+  "scripts": {
+    "install:app": "cd Hintify_app && npm install",
+    "install:website": "cd Hintidy_website && npm install",
+    "install:all": "npm run install:app && npm run install:website",
+    "dev:app": "cd Hintify_app && npm run dev",
+    "dev:website": "cd Hintidy_website && npm run dev",
+    "build:app": "cd Hintify_app && npm run build-mac",
+    "build:website": "cd Hintidy_website && npm run build",
+    "build:all": "npm run build:app && npm run build:website",
+    "start:app": "cd Hintify_app && npm start",
+    "start:website": "cd Hintidy_website && npm start",
+    "setup:database": "./setup-database.sh",
+    "test:integration": "node quick-test.js",
+    "clean": "rm -rf */node_modules */dist */.next",
+    "postinstall": "npm run install:all"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AryanVBW/Hintify.git"
+  },
+  "keywords": [
+    "ai",
+    "education",
+    "study",
+    "hints",
+    "ocr",
+    "electron",
+    "nextjs",
+    "assistant",
+    "homework",
+    "learning"
+  ],
+  "author": {
+    "name": "AryanVBW",
+    "email": "demo@hintify.app",
+    "url": "https://github.com/AryanVBW"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/AryanVBW/Hintify",
+  "bugs": {
+    "url": "https://github.com/AryanVBW/Hintify/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1",
+    "dotenv": "^17.2.2"
+  }
+}

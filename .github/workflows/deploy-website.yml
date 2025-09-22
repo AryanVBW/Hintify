@@ -1,0 +1,49 @@
+name: Deploy Website to Vercel
+
+on:
+  push:
+    branches: [ main ]
+    paths: 
+      - 'Hintidy_website/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Hintidy_website/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'Hintidy_website/package-lock.json'
+        
+    - name: Install dependencies
+      run: |
+        cd Hintidy_website
+        npm ci
+        
+    - name: Build website
+      run: |
+        cd Hintidy_website
+        npm run build
+      env:
+        NEXT_PUBLIC_STACK_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_STACK_PROJECT_ID }}
+        NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY: ${{ secrets.NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY }}
+        STACK_SECRET_SERVER_KEY: ${{ secrets.STACK_SECRET_SERVER_KEY }}
+        
+    - name: Deploy to Vercel
+      uses: amondnet/vercel-action@v25
+      with:
+        vercel-token: ${{ secrets.VERCEL_TOKEN }}
+        vercel-args: '--prod'
+        vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+        vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+        working-directory: ./Hintidy_website

@@ -1,0 +1,92 @@
+name: Build and Release Electron App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: 'Hintify_app/package-lock.json'
+        
+    - name: Install dependencies
+      run: |
+        cd Hintify_app
+        npm ci
+        
+    - name: Build Electron app (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        cd Hintify_app
+        npm run build-mac
+      env:
+        CI: true
+        
+    - name: Build Electron app (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        cd Hintify_app
+        npm run build-win
+      env:
+        CI: true
+        
+    - name: Build Electron app (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        cd Hintify_app
+        npm run build-linux
+      env:
+        CI: true
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: hintify-${{ matrix.os }}
+        path: |
+          Hintify_app/dist/*.dmg
+          Hintify_app/dist/*.zip
+          Hintify_app/dist/*.exe
+          Hintify_app/dist/*.AppImage
+          Hintify_app/dist/*.deb
+        retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ./artifacts
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          artifacts/**/*
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

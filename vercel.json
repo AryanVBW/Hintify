@@ -1,0 +1,13 @@
+{
+  "name": "hintify",
+  "version": 2,
+  "buildCommand": "cd Hintidy_website && npm run build",
+  "outputDirectory": "Hintidy_website/.next",
+  "installCommand": "cd Hintidy_website && npm install",
+  "framework": "nextjs",
+  "env": {
+    "NEXT_PUBLIC_STACK_PROJECT_ID": "@stack_project_id",
+    "NEXT_PUBLIC_STACK_PUBLISHABLE_CLIENT_KEY": "@stack_publishable_key", 
+    "STACK_SECRET_SERVER_KEY": "@stack_secret_key"
+  }
+}

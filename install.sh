@@ -543,11 +543,6 @@ launch_app() {
         echo -e "${GREEN}║                                                        ║${RESET}"
         echo -e "${GREEN}║   ${CYAN}${APP_DISPLAY_NAME}${GREEN}                   ║${RESET}"
         echo -e "${GREEN}║   ${YELLOW}is now ready to use!${GREEN}                ║${RESET}"
-        echo -e "${GREEN}║                                                        ║${RESET}"
-        echo -e "${GREEN}║   ${BLUE}Designed by: ${MAGENTA}Rishabh Bafna${GREEN}  ║${RESET}"
-        echo -e "${GREEN}║   ${BLUE}Built by: ${MAGENTA}Vivek W${GREEN}           ║${RESET}"
-        echo -e "${GREEN}║   ${BLUE}Made with ${RED}love${BLUE} for macOS${GREEN} ║${RESET}"
-        echo -e "${GREEN}║                                                        ║${RESET}"
         echo -e "${GREEN}╚════════════════════════════════════════════════════════╝${RESET}"
         
         # Final celebration animation
@@ -606,7 +601,6 @@ main() {
     
     print_message "$BOLD$GREEN" "Thank you for installing Hintify!" "$MAGIC"
     print_message "$CYAN" "Visit https://hintify.nexus-v.tech/ for more information" "$INFO"
-    print_message "$BOLD$YELLOW" "Concept by Rishabh Bafna | Built by Vivek W" "$INFO"
 }
 
 # Run main function

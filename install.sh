@@ -16,7 +16,7 @@
 #############################################################################
 
 # Configuration - Modify these values for your specific app
-GITHUB_REPO_URL="https://github.com/AryanVBW/Hintify/releases/download/v1/Hintify.SnapAssist.AI-1.0.4-mac-arm64.zip"
+GITHUB_REPO_URL="https://github.com/AryanVBW/Hintify/releases/download/v1/hintify.zip"
 APP_NAME="Hintify"
 APP_DISPLAY_NAME="Hintify - Your Smart Assistant"
 
